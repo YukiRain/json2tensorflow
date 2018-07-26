@@ -152,7 +152,7 @@ class nnBase(object):
         raise NotImplementedError
 
     @staticmethod
-    def print_all_variables():
+    def show_all_variables(*args, **kwargs):
         all_variables = tf.trainable_variables()
         slim.model_analyzer.analyze_vars(all_variables, print_info=True)
 
@@ -184,5 +184,5 @@ class nnBase(object):
 
 if __name__ == '__main__':
     net = nnBase()
-    net.print_all_variables()
+    net.show_all_variables()
     net.load()

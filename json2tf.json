@@ -25,6 +25,7 @@
     "loss": "cross_entropy",
     "model_name": "VGG",
     "num_classes": 10,
+    "optimizer": "adam",
     "pooling_stride": 2,
     "pooling_type": "max",
     "sparse_ys": true,
