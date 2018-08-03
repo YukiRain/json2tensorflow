@@ -7,12 +7,13 @@ import pandas as pd
 
 from json_parser import TFNetworkParserTrain, TFNetworkParserTest
 
-default_path = 'E:\\Python\\cloud\\data\\'
+default_path = 'D:\\cloud\\mode_M2009\\'
 
 def init_reader(path=default_path, batch_size=8, epoch=10, shuffle=True):
     def _parse_function(xs, ys):
         x_img_str = tf.read_file(xs)
-        x_img_decoded = tf.image.convert_image_dtype(tf.image.decode_jpeg(x_img_str), tf.float32)
+        x_img_decoded = tf.image.convert_image_dtype(tf.image.decode_jpeg(x_img_str),
+                                                     tf.float32)
         x_img_resized = tf.image.resize_images(x_img_decoded, size=[512, 512],
                                                method=tf.image.ResizeMethod.BILINEAR)
         return x_img_resized, ys
@@ -31,7 +32,8 @@ def init_reader(path=default_path, batch_size=8, epoch=10, shuffle=True):
         t_labels[it] = list(map(lambda x: ord(x) - ord('A'), t_labels[it]))
 
     # Initialize as the tensorflow tensor object
-    data = tf.data.Dataset.from_tensor_slices((tf.constant(file_names), tf.constant(t_labels)))
+    data = tf.data.Dataset.from_tensor_slices((tf.constant(file_names),
+                                               tf.constant(t_labels)))
     data = data.map(_parse_function)
     # return data.shuffle(buffer_size=1024).batch(batch_size).repeat(epoch)
     if shuffle:
@@ -49,20 +51,28 @@ class CloudNetworkTrain(TFNetworkParserTrain):
         off_hs = [0, 128, 256, 384, 0, 128, 256, 384]
         x_img_cuts = [tf.image.crop_to_bounding_box(batch_xs, hs, ws, 128, 256)\
                       for hs, ws in zip(off_hs, off_ws)]
-        self.batch_xs = tf.reshape(tf.concat(x_img_cuts, axis=0), [batch_size * 8, 128, 256, 3])
+        self.batch_xs = tf.reshape(tf.concat(x_img_cuts, axis=0),
+                                   [batch_size * 8, 128, 256, 1])
         self.batch_ys = tf.reshape(batch_ys, [-1])
         super(CloudNetworkTrain, self).__init__({'xs': self.batch_xs, 'ys': self.batch_ys},
                                                 json_dir, learning_rate, model_dir, pre_train)
+        self.name = 'net'
 
-    def train(self, steps, log_dir='./logs/', log_iter=100):
+    def train(self, steps, log_dir='./logs/', log_iter=40):
         writer = tf.summary.FileWriter(log_dir, self.sess.graph)
         for it in range(steps):
-            self.sess.run(self.optim)
-            if it % log_iter == 20:
-                sum_str, loss, mAP = self.sess.run([self.summary, self.loss, self.mAP])
-                writer.add_summary(sum_str, self.counter)
-                words = ' --iteration {} --loss {} --mAP {}'.format(it, loss, mAP)
-                print(datetime.now(), words)
+            try:
+                self.sess.run(self.optim)
+                if it % log_iter == 20:
+                    sum_str, loss, mAP = self.sess.run([self.summary, self.loss, self.mAP])
+                    writer.add_summary(sum_str, self.counter)
+                    words = ' --iteration {} --loss {} --mAP {}'.format(it, loss, mAP)
+                    print(datetime.now(), words)
+            except tf.errors.InvalidArgumentError:
+                continue
+            except:
+                break
+            self.counter += 1
         print('Training finish...Saving...')
         self.save()
 
@@ -75,10 +85,12 @@ class CloudNetworkTest(TFNetworkParserTest):
         off_hs = [0, 128, 256, 384, 0, 128, 256, 384]
         x_img_cuts = [tf.image.crop_to_bounding_box(batch_xs, hs, ws, 128, 256)\
                       for hs, ws in zip(off_hs, off_ws)]
-        self.batch_xs = tf.reshape(tf.concat(x_img_cuts, axis=0), [batch_size * 8, 128, 256, 3])
+        self.batch_xs = tf.reshape(tf.concat(x_img_cuts, axis=0),
+                                   [batch_size * 8, 128, 256, 1])
         self.batch_ys = tf.reshape(batch_ys, [-1])
         super(CloudNetworkTest, self).__init__({'xs': self.batch_xs, 'ys': self.batch_ys},
-                                                json_dir, model_dir, pre_train)
+                                               json_dir, model_dir, pre_train)
+        self.model_dir = model_dir
 
     def evaluate(self, *args, **kwargs):
         accuracy = 0.0
@@ -111,5 +123,6 @@ if __name__ == '__main__':
     #     print(x.shape, y, y.shape)
     #     print(batch_xs, batch_ys)
 
-    cloud = CloudNetworkTest('./json2tf.json', pre_train=False)
-    print('The accuracy is {}'.format(cloud.evaluate()))
+    TRAIN_STEPS = int(sys.argv[1])
+    cloud = CloudNetworkTrain('./json2tf.json', pre_train=True)
+    cloud.train(TRAIN_STEPS)

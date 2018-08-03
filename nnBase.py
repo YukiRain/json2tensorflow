@@ -8,7 +8,7 @@ def _check_valid(func):
         info = 'Parameters like saver, sess, counter or model_dir should be specified'
         if not this._isvalid():
             raise NotImplementedError(info)
-        func()
+        return func(this)
     return decorate
 
 
@@ -22,7 +22,6 @@ class nnBase(object):
     def _isvalid(self):
         return self.saver is not None \
                and self.sess is not None \
-               and self.counter is not None \
                and self.model_dir is not None
 
     @staticmethod
@@ -164,7 +163,8 @@ class nnBase(object):
             fs = os.listdir(self.model_dir)
             for f in fs:
                 os.remove(self.model_dir + f)
-        save_path = self.saver.save(self.sess, self.model_dir + 'net.model', global_step=self.counter)
+        save_path = self.saver.save(self.sess, self.model_dir + self.name + '.model',
+                                    global_step=self.counter)
         print('MODEL RESTORED IN: ' + save_path)
 
     @_check_valid

@@ -260,7 +260,7 @@ class TFNetworkParserTrain(TFNetworkParser):
         self.sess = tf.InteractiveSession(config=config)
         tf.global_variables_initializer().run()
 
-        if pre_train and len(os.listdir(model_dir)) != 0:
+        if pre_train and os.listdir(model_dir):
             _, self.counter = self.load()
         else:
             print('Build model from scratch!!')
