@@ -6,21 +6,21 @@ import pandas as pd
 import os, sys
 from datetime import datetime
 
-# TODO: split the training set and the validation set in "def init_reader"
-# TODO: Finish the evaluation part
+# TODO: output the results to file "results.csv" and compute the confusion matrix
 
 flags = tf.app.flags
 ERROR_FLAG = 0
 
 flags.DEFINE_string('pretrain_dir', './checkpoints/resnet_v1_152.ckpt', '')
-flags.DEFINE_string('model_dir', './checkpoints/resnet_ordinal.model', '')
+flags.DEFINE_string('model_dir', './checkpoints/models/resnet_ordinal.model', '')
 flags.DEFINE_string('data_dir', '../../datasets/cloud/mode_2004/', '')
 flags.DEFINE_string('logdir', './logs/', '')
+flags.DEFINE_string('optimizer', 'SGD', 'Either Adam or SGD')
 flags.DEFINE_string('losstype', 'ordinal', 'Either ordinal or cross_entropy')
 flags.DEFINE_boolean('is_training', True, 'Train or evaluate?')
 flags.DEFINE_integer('batch_size', 8, '')
 flags.DEFINE_integer('loops', 20000, 'Number of iteration in training')
-flags.DEFINE_float('learning_rate', 0.08, 'Initial learning rate')
+flags.DEFINE_float('learning_rate', 8e-3, 'Initial learning rate')
 flags.DEFINE_boolean('pretrained', True, 'Whether using the pretrained model given by TensorFlow')
 
 FLAGS = flags.FLAGS
@@ -37,12 +37,26 @@ def load(sess, model_dir):
 	import re
 	print(' [*] Reading checkpoints...')
 	ckpt = tf.train.get_checkpoint_state(model_dir)
+	saver = tf.train.Saver(max_to_keep=1)
 	if ckpt and ckpt.model_checkpoint_path:
 		ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
-		self.saver.restore(self.sess, self.model_dir + ckpt_name)
+		saver.restore(sess, model_dir + ckpt_name)
 		counter = int(next(re.finditer("(\d+)(?!.*\d)", ckpt_name)).group(0))
 		print(" [*] Success to read {}".format(ckpt_name))
 		return counter
+	else:
+		print(" [*] Failed to find a checkpoint")
+		return ERROR_FLAG
+
+
+def get_counter(model_dir):
+	import re
+	print(' [*] Reading checkpoints...')
+	ckpt = tf.train.get_checkpoint_state(model_dir)
+	if ckpt and ckpt.model_checkpoint_path:
+		ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
+		print(" [*] Success to read {}".format(ckpt_name))
+		return int(next(re.finditer("(\d+)(?!.*\d)", ckpt_name)).group(0))
 	else:
 		print(" [*] Failed to find a checkpoint")
 		return ERROR_FLAG
@@ -147,14 +161,15 @@ def init_loss(logits, labels, end_points=None, losstype='ordinal'):
 		# Definition of binary network for better classification of "*"
 		# The network has only 3 layers, with the front-end being resnet_v1_152/block3
 		# See the graph in tensorboard for more detailed information
-		conv_1 = slim.conv2d(end_points['resnet_v1_152/block3'], 64, [3, 3], scope='conv_1')
-		conv_2 = slim.conv2d(conv_1, 1, [3, 3], scope='conv_2')
-		reshaped = tf.reshape(conv_2, [FLAGS.batch_size*8, -1], name='reshaped')
-		binary = slim.fully_connected(reshaped, 1, activation_fn=None, scope='fc_3')
-		binary_labels = tf.cast(tf.equal(labels, 5), tf.int32)
-		binary_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=binary_labels,
-		                                                             logits=binary)
-		binary_loss = tf.reduce_mean(binary_loss, name='binary_loss')
+		with tf.variable_scope('binary_classification_for_nodata'):
+			conv_1 = slim.conv2d(end_points['resnet_v1_152/block4'], 64, [3, 3], scope='conv_1')
+			conv_2 = slim.conv2d(conv_1, 1, [3, 3], scope='conv_2')
+			reshaped = tf.reshape(conv_2, [FLAGS.batch_size*8, -1], name='reshaped')
+			binary = slim.fully_connected(reshaped, 1, activation_fn=None, scope='fc_3')
+			binary_labels = tf.reshape(tf.cast(tf.equal(labels, 5), tf.float32), [-1, 1])
+			binary_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=binary_labels,
+		                                                        logits=binary)
+			binary_loss = tf.reduce_mean(binary_loss, name='binary_loss')
 	
 	# Here we start our cross entropy loss definition
 	if losstype == 'cross_entropy':
@@ -190,7 +205,7 @@ def main(_):
 	x_img_cuts = [tf.image.crop_to_bounding_box(batch_xs, hs, ws, 128, 256)\
 	              	for hs, ws in zip(off_hs, off_ws)]
 	batch_xs = tf.reshape(tf.concat(x_img_cuts, axis=0), [FLAGS.batch_size*8, 128, 256, 3])
-	batch_ys = tf.reshape(batch_ys, [-1])
+	batch_ys = tf.reshape(batch_ys, [FLAGS.batch_size * 8])
 
 	if FLAGS.is_training:
 		with slim.arg_scope(resnet_v1.resnet_arg_scope()):
@@ -205,10 +220,22 @@ def main(_):
 			loss_sum = tf.summary.scalar('loss', loss)
 			summaries = tf.summary.merge([mAP_sum, loss_sum])
 			
-		# Ready to train
 		config = tf.ConfigProto()
 		config.gpu_options.allow_growth = True
 		sess = tf.InteractiveSession(config=config)
+		counter = get_counter(FLAGS.model_dir)
+
+		# Exponential decay learning rate and optimizer configurations
+		learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, counter, 
+		                                           100, 0.98, staircase=True)
+		if 'SGD' in FLAGS.optimizer:
+			optim = tf.train.GradientDescentOptimizer(learning_rate).minimize(loss, 
+			                                                                  global_step=tf.Variable(counter))
+		elif 'Adam' in FLAGS.optimizer:
+			optim = tf.train.AdamOptimizer(learning_rate).minimize(loss, global_step=tf.Variable(counter))
+		else:
+			optim = None
+			raise NotImplementedError
 		sess.run(tf.global_variables_initializer())
 
 		if FLAGS.pretrained:
@@ -218,18 +245,12 @@ def main(_):
 			init_fn = slim.assign_from_checkpoint_fn(FLAGS.pretrain_dir, resnet_except_logits,
 			                                         ignore_missing_vars=True)
 			init_fn(sess)
-			counter = 0
 			print('Model successfully loaded')
 		else:
- 			# Load the model trained by ourselves
+			# Load the model trained by ourselves
 			counter = load(sess, FLAGS.model_dir)
 
-		# Exponential decay learning rate
-		learning_rate = tf.train.exponential_decay(FLAGS.learning_rate, counter, 
-		                                           100, 0.98, staircase=True)
-		optim = tf.train.AdamOptimizer(learning_rate).minimize(loss, global_step=tf.Variable(counter))
-		uninitialized_vars = [var for var in tf.all_variables() if 'resnet_v1_152' not in var.name]
-		sess.run(tf.variables_initializer(uninitialized_vars))
+		# Ready to train
 		train(sess, optim, loss, summaries, FLAGS.loops, counter=counter)
 		print('Training finished')
 	else:
@@ -248,3 +269,4 @@ def main(_):
 
 if __name__ == '__main__':
 	tf.app.run()
+
