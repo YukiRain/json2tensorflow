@@ -14,12 +14,13 @@ ERROR_FLAG = 0
 flags.DEFINE_string('pretrain_dir', './checkpoints/resnet_v1_152.ckpt', '')
 flags.DEFINE_string('model_dir', './checkpoints/models/resnet_ordinal.model', '')
 flags.DEFINE_string('data_dir', '../../datasets/cloud/mode_2004/', '')
+flags.DEFINE_string('model_basedir', './checkpoints/models/', '')
 flags.DEFINE_string('logdir', './logs/', '')
 flags.DEFINE_string('optimizer', 'SGD', 'Either Adam or SGD')
 flags.DEFINE_string('losstype', 'ordinal', 'Either ordinal or cross_entropy')
 flags.DEFINE_boolean('is_training', True, 'Train or evaluate?')
 flags.DEFINE_integer('batch_size', 8, '')
-flags.DEFINE_integer('loops', 20000, 'Number of iteration in training')
+flags.DEFINE_integer('loops', 40000, 'Number of iteration in training')
 flags.DEFINE_float('learning_rate', 8e-3, 'Initial learning rate')
 flags.DEFINE_boolean('pretrained', True, 'Whether using the pretrained model given by TensorFlow')
 
@@ -27,8 +28,9 @@ FLAGS = flags.FLAGS
 
 
 def save(sess, model_dir, counter):
+	saver = tf.train.Saver(max_to_keep=1)
 	if not os.path.exists(model_dir):
-		os.makedirs(self.model_dir)
+		os.makedirs(model_dir)
 	save_path = saver.save(sess, model_dir, global_step=counter)
 	print('MODEL RESTORED IN: ' + save_path)
 
@@ -51,7 +53,7 @@ def load(sess, model_dir):
 
 def get_counter(model_dir):
 	import re
-	print(' [*] Reading checkpoints...')
+	print(' [*] Try reading global counter...')
 	ckpt = tf.train.get_checkpoint_state(model_dir)
 	if ckpt and ckpt.model_checkpoint_path:
 		ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
@@ -117,7 +119,7 @@ def evaluate(sess, accuracy, acc_update):
 	return accuracy
 
 
-def init_reader(path=FLAGS.data_dir, batch_size=8, epoch=10, is_training=True):
+def init_reader(path=FLAGS.data_dir, batch_size=8, epoch=20, is_training=True):
 	def _parse_function(xs, ys):
 		x_img_str = tf.read_file(xs)
 		x_img_decoded = tf.image.convert_image_dtype(tf.image.decode_jpeg(x_img_str), tf.float32)
@@ -159,7 +161,7 @@ def init_reader(path=FLAGS.data_dir, batch_size=8, epoch=10, is_training=True):
 def init_loss(logits, labels, end_points=None, losstype='ordinal'):
 	if end_points is not None:
 		# Definition of binary network for better classification of "*"
-		# The network has only 3 layers, with the front-end being resnet_v1_152/block3
+		# The network has only 3 layers, with the front-end being resnet_v1_152/block4
 		# See the graph in tensorboard for more detailed information
 		with tf.variable_scope('binary_classification_for_nodata'):
 			conv_1 = slim.conv2d(end_points['resnet_v1_152/block4'], 64, [3, 3], scope='conv_1')
@@ -172,10 +174,12 @@ def init_loss(logits, labels, end_points=None, losstype='ordinal'):
 			binary_loss = tf.reduce_mean(binary_loss, name='binary_loss')
 	
 	# Here we start our cross entropy loss definition
+	# Note that the "nodata" class "*" is assigned with 0 loss
 	if losstype == 'cross_entropy':
 		loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, 
 		                                                      logits=logits)
-		return tf.reduce_mean(loss, name='loss') + binary_loss, binary
+		mask = 1.0 - tf.cast(tf.equal(labels, 5), tf.float32)
+		return tf.reduce_mean(mask * loss, name='loss') + binary_loss, binary
 	elif losstype == 'ordinal':
 		import math
 		ks = [np.arange(1, 7).astype(np.float32)[None, :] \
@@ -190,7 +194,8 @@ def init_loss(logits, labels, end_points=None, losstype='ordinal'):
 		poisson = k_vector * log_exp - logits - tf.log(k_factor)
 		loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels,
 		                                                      logits=poisson)
-		return tf.reduce_mean(loss, name='loss') + binary_loss, binary
+		mask = 1.0 - tf.cast(tf.equal(labels, 5), tf.float32)
+		return tf.reduce_mean(loss * mask, name='loss') + binary_loss, binary
 	else:
 		raise NotImplementedError
 
@@ -248,7 +253,7 @@ def main(_):
 			print('Model successfully loaded')
 		else:
 			# Load the model trained by ourselves
-			counter = load(sess, FLAGS.model_dir)
+			counter = load(sess, FLAGS.model_basedir)
 
 		# Ready to train
 		train(sess, optim, loss, summaries, FLAGS.loops, counter=counter)
@@ -257,7 +262,7 @@ def main(_):
 		with slim.arg_scope(resnet_v1.resnet_arg_scope()):
 			probs, end_points = resnet_v1.resnet_v1_152(batch_xs, num_classes=6,
 																									is_training=False)
-			prediction = tf.argmax(tf.reshape(probs, [-1, 1000]), axis=-1)
+			prediction = tf.argmax(tf.reshape(probs, [-1, 6]), axis=-1)
 			accuracy, update_acc = tf.metrics.accuracy(batch_ys, arg_ys)
 			_, binary = init_loss(probs, batch_ys, end_points, loss_type=FLAGS.losstype)
 
