@@ -15,7 +15,47 @@ flags.DEFINE_integer('batch_size', 8, '')
 flags.DEFINE_string('data_dir', '../../datasets/cloud/mode_2004/', '')
 flags.DEFINE_string('model_dir', './checkpoints/models/resnet_ordinal.model', '')
 flags.DEFINE_string('losstype', 'ordinal', '')
+flags.DEFINE_string('optimizer', 'SGD', 'Either Adam or SGD')
+flags.DEFINE_float('learning_rate', 8e-3, 'Initial learning rate')
+flags.DEFINE_string('model_basedir', './checkpoints/models/', '')
 FLAGS = flags.FLAGS
+ERROR_FLAG = 0
+
+def save(sess, model_dir, counter):
+	saver = tf.train.Saver(max_to_keep=1)
+	if not os.path.exists(model_dir):
+		os.makedirs(model_dir)
+	save_path = saver.save(sess, model_dir, global_step=counter)
+	print('MODEL RESTORED IN: ' + save_path)
+
+
+def load(sess, model_dir):
+	import re
+	print(' [*] Reading checkpoints...')
+	ckpt = tf.train.get_checkpoint_state(model_dir)
+	saver = tf.train.Saver(max_to_keep=1)
+	if ckpt and ckpt.model_checkpoint_path:
+		ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
+		saver.restore(sess, model_dir + ckpt_name)
+		counter = int(next(re.finditer("(\d+)(?!.*\d)", ckpt_name)).group(0))
+		print(" [*] Success to read {}".format(ckpt_name))
+		return counter
+	else:
+		print(" [*] Failed to find a checkpoint")
+		return ERROR_FLAG
+
+def get_counter(model_dir):
+	import re
+	print(' [*] Try reading global counter...')
+	ckpt = tf.train.get_checkpoint_state(model_dir)
+	if ckpt and ckpt.model_checkpoint_path:
+		ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
+		print(" [*] Success to read {}".format(ckpt_name))
+		return int(next(re.finditer("(\d+)(?!.*\d)", ckpt_name)).group(0))
+	else:
+		print(" [*] Failed to find a checkpoint")
+		return ERROR_FLAG
+
 
 def init_reader(path=FLAGS.data_dir, batch_size=8, epoch=10, is_training=True):
 	def _parse_function(xs, ys):
@@ -45,10 +85,11 @@ def init_reader(path=FLAGS.data_dir, batch_size=8, epoch=10, is_training=True):
 	data = tf.data.Dataset.from_tensor_slices((tf.constant(file_names),
 	                                           tf.constant(t_labels)))
 	data = data.map(_parse_function)
-	return data.batch_size(batch_size)
+	return data.batch(batch_size)
 
 
 def init_loss(logits, labels, end_points=None, losstype='ordinal'):
+	print(logits.get_shape(), labels.get_shape())
 	if end_points is not None:
 		# Definition of binary network for better classification of "*"
 		# The network has only 3 layers, with the front-end being resnet_v1_152/block3
@@ -80,8 +121,7 @@ def init_loss(logits, labels, end_points=None, losstype='ordinal'):
 		softmaxed = tf.nn.softmax(logits, axis=-1, name='softmax')
 		log_exp = tf.log(softmaxed)
 		poisson = k_vector * log_exp - logits - tf.log(k_factor)
-		loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels,
-		                                                      logits=poisson)
+		loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=poisson)
 		return tf.reduce_mean(loss, name='loss') + binary_loss, binary
 	else:
 		raise NotImplementedError
@@ -96,6 +136,7 @@ class Confusion(object):
 	'''
 	def __init__(self, sess, pred_op, binary_op, label_op):
 		self.matrix = np.zeros((6, 6), dtype=np.int64)
+		counter = 0
 		while True:
 			try:
 				pred, binary, ys = sess.run([pred_op, binary_op, label_op])
@@ -110,6 +151,9 @@ class Confusion(object):
 			except tf.errors.InvalidArgumentError:
 				print('An error of type tf.errors.InvalidArgumentError has been ignored...')
 				continue
+			counter += 1
+			if counter % 200 == 5:
+				print(self.matrix)
 		print(' [*] Confusion matrix initialized!')
 
 	def __str__(self):
@@ -132,8 +176,9 @@ def main(_):
 
 	with slim.arg_scope(resnet_v1.resnet_arg_scope()):
 		probs, end_points = resnet_v1.resnet_v1_152(batch_xs, num_classes=6, is_training=False)
-		prediction = tf.argmax(tf.reshape(probs, [-1, 6]))
-		_, binary = init_loss(probs, batch_ys, end_points, loss_type=FLAGS.losstype)
+		probs = tf.reshape(probs, [-1, 6])
+		prediction = tf.argmax(probs, axis=-1)
+		loss, binary = init_loss(probs, batch_ys, end_points, losstype=FLAGS.losstype)
 	
 	config = tf.ConfigProto()
 	config.gpu_options.allow_growth = True
@@ -153,7 +198,7 @@ def main(_):
 	# Initialize all variables
 	# Load the pretrained model and initialize the global counter
 	sess.run(tf.global_variables_initializer())
-	counter = load(sess, FLAGS.model_dir)
+	counter = load(sess, FLAGS.model_basedir)
 
 	confusion_matrix = Confusion(sess, prediction, binary, batch_ys)
 	print(confusion_matrix)
